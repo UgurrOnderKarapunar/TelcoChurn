@@ -1,0 +1,191 @@
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Input, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+import kerastuner as kt
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, RobustScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
+import matplotlib.pyplot as plt
+import joblib
+
+def build_model(hp, input_dim):
+    model = Sequential()
+    model.add(Input(shape=(input_dim,)))
+
+    for i in range(hp.Int('num_layers', 1, 5)): 
+        model.add(Dense(units=hp.Int(f'units_{i}', min_value=32, max_value=128, step=32), activation='relu'))
+        
+        if hp.Boolean(f'batch_norm_{i}'):
+            model.add(BatchNormalization())
+        
+        model.add(Dropout(rate=hp.Float(f'dropout_{i}', min_value=0.0, max_value=0.5, step=0.1)))
+
+    model.add(Dense(1, activation="sigmoid"))
+
+    model.compile(
+        optimizer=Adam(learning_rate=hp.Float('learning_rate', min_value=0.00001, max_value=0.1, sampling='log')),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    
+    return model
+
+def plot_history(history):
+    plt.plot(history.history['loss'], label='Training Loss')
+    plt.plot(history.history['val_loss'], label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.show()
+
+def modelling_dl_tuner(dataframe, target):
+    print("**** WELCOME TO DL MODELLING WITH TUNER ****")
+    
+    # Feature and target split
+    X = dataframe.drop(target, axis=1)
+    y = dataframe[target]
+    
+    # Encode target variable
+    label = LabelEncoder()
+    y = label.fit_transform(y)
+    
+    print("Shape of X:", X.shape)
+    print("Shape of y:", y.shape)
+    
+    # Identify categorical and numerical columns
+    categorical_c = X.select_dtypes(include="object").columns
+    numerical_c = X.select_dtypes(include=["float", "int"]).columns
+    
+    # Identify dominant columns in categorical data
+    print("****** Dominant Cols *********")
+    doms_list = []
+    for col in categorical_c:
+        doms = X[col].value_counts(normalize=True)
+        if doms.max() > 0.90:
+            doms_list.append(col)
+    print(f"Dominant Cols List: {doms_list}")
+
+    # Remove dominant columns from categorical columns
+    categorical_c = [col for col in categorical_c if col not in doms_list]
+    print(f"New Categorical Cols: {categorical_c}")
+    
+    print(f"Categorical Columns: {categorical_c}")
+    print(f"Numerical Columns: {numerical_c}")
+    
+    # Define pipelines for preprocessing
+    categorical_pipeline = Pipeline(steps=[ 
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("encoder", OneHotEncoder(handle_unknown="ignore", sparse=False))
+    ])
+    
+    numerical_pipeline = Pipeline(steps=[ 
+        ("imputer", SimpleImputer(strategy="mean")),
+        ("scaler", RobustScaler())
+    ])
+    
+    preprocess = ColumnTransformer(transformers=[ 
+        ("num", numerical_pipeline, numerical_c),
+        ("cat", categorical_pipeline, categorical_c)
+    ])
+    
+    # Split data into train and test sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=4)
+    
+    # Preprocess data
+    X_train_processed = preprocess.fit_transform(X_train)
+    X_test_processed = preprocess.transform(X_test)
+    
+    print("Data preprocessing completed.")
+    
+    # Get the number of features
+    input_dim = X_train_processed.shape[1]
+    print(f"Input dimension: {input_dim}")
+    
+    # Define the tuner
+    tuner = kt.Hyperband(
+        lambda hp: build_model(hp, input_dim),
+        objective='val_loss',
+        max_epochs=100,
+        factor=3,
+        directory='my_dir',
+        project_name='intro_to_kt'
+    )
+    
+    # Search for the best hyperparameters
+    tuner.search(X_train_processed, y_train, epochs=100, validation_data=(X_test_processed, y_test))
+    
+    # Retrieve the best model
+    best_model = tuner.get_best_models(num_models=1)[0]
+    
+    # Retrieve the best hyperparameters
+    best_hps = tuner.get_best_hyperparameters(num_trials=1)[0]
+    
+    # En iyi hiperparametreleri ekrana yazdırma
+    print("Best Hyperparameters:")
+    for i in range(best_hps.get('num_layers')):
+        print(f"Layer {i+1} units: {best_hps.get(f'units_{i}')}") 
+        print(f"Layer {i+1} dropout: {best_hps.get(f'dropout_{i}')}") 
+        print(f"Layer {i+1} batch_norm: {'Yes' if best_hps.get(f'batch_norm_{i}') else 'No'}") 
+    print(f"Learning Rate: {best_hps.get('learning_rate')}")
+    
+    # Hiperparametreleri döndürme
+    best_hyperparameters = {
+        "num_layers": best_hps.get('num_layers'),
+        "learning_rate": best_hps.get('learning_rate')
+    }
+    for i in range(best_hps.get('num_layers')):
+        best_hyperparameters[f"Layer_{i+1}_units"] = best_hps.get(f'units_{i}')
+        best_hyperparameters[f"Layer_{i+1}_dropout"] = best_hps.get(f'dropout_{i}')
+        best_hyperparameters[f"Layer_{i+1}_batch_norm"] = best_hps.get(f'batch_norm_{i}')
+    
+    print("Best model found.")
+    
+    # Train the best model
+    history = best_model.fit(
+        X_train_processed, y_train,
+        validation_data=(X_test_processed, y_test),
+        epochs=100,
+        batch_size=32,
+        verbose=1
+    )
+    
+    print("Model training completed.")
+    
+    # Model evaluation
+    y_pred = (best_model.predict(X_test_processed) > 0.5).astype("int32")
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    roc_auc = roc_auc_score(y_test, y_pred)
+    
+    print(f"Accuracy: {accuracy:.2f}")
+    print(f"F1 Score: {f1:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"Precision: {precision:.2f}")
+    print(f"ROC AUC Score: {roc_auc:.2f}")
+    
+    # Plot training history
+    plot_history(history)
+    
+    # Save best hyperparameters to a file
+    joblib.dump(best_hyperparameters, 'best_hyperparameters.pkl')
+    
+    return X, y, categorical_c, numerical_c, y_test, y_pred, best_hyperparameters
+
+
+# Call the function
+X, y, categorical_c, numerical_c, y_test, y_pred, best_hyperparameters = modelling_dl_tuner(df, "Churn")
+
+print("Best Hyperparameters:")
+for param, value in best_hyperparameters.items():
+    print(f"{param}: {value}")
+
+joblib.dump(best_hyperparameters, 'best_hyperparameters.pkl')
