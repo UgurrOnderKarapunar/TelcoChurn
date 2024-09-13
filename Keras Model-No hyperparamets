@@ -1,0 +1,157 @@
+import pandas as pd
+import tensorflow as tf  
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, RobustScaler
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Input
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+import matplotlib.pyplot as plt
+
+def modelling_dl(dataframe, target):
+    print("**** WELCOME TO DL MODELLING ****")
+    print("**** Starting modelling ****")
+    print("************** *************")
+    
+    print("**** SPLITTING X and y ****")
+    
+    X = dataframe.drop(target, axis=1)
+    y = dataframe[target]
+    label = LabelEncoder()
+    y = label.fit_transform(y)
+    print("****** Basic Info of Datasets:*******")
+    print("Shape of X:", X.shape)
+    print("Shape of y:", y.shape)
+    print("Data Info:\n", X.info())
+    
+    
+    
+    print("******* Catch Num and Cat *********")
+    categorical_c = X.select_dtypes(include="object").columns
+    numerical_c = X.select_dtypes(include=["float", "int"]).columns
+    print(f"Categorical Cols: {categorical_c}")
+    print(f"Numerical Cols: {numerical_c}")
+    
+    print("****** Dominant Cols *********")
+    doms_list = []
+    for col in categorical_c:
+        doms = X[col].value_counts(normalize=True)
+        if doms.max() > 0.90:
+            doms_list.append(col)
+    print(f"Dominant Cols List: {doms_list}")
+
+    # Remove dominant columns from categorical columns
+    categorical_c = [col for col in categorical_c if col not in doms_list]
+    print(f"New Categorical Cols: {categorical_c}")
+    
+    print("******* Pipeline Process ***** ")
+    
+    categorical_pipeline = Pipeline(steps=[
+        ("encoder", OneHotEncoder(handle_unknown="ignore", sparse=False)),
+        ("imputer", SimpleImputer(strategy="most_frequent"))
+    ])
+    
+    numerical_pipeline = Pipeline(steps=[
+        ("scaler", RobustScaler()),
+        ("imputer", SimpleImputer(strategy="mean"))
+    ])
+    
+    preprocess = ColumnTransformer(transformers=[
+        ("num", numerical_pipeline, numerical_c),
+        ("cat", categorical_pipeline, categorical_c)
+    ])
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=4)
+    
+    # Fit and transform the training data, transform the test data
+    X_train_processed = preprocess.fit_transform(X_train)
+    X_test_processed = preprocess.transform(X_test)
+    
+    # TensorFlow Dataset API kullanımı
+    train_dataset = tf.data.Dataset.from_tensor_slices((X_train_processed, y_train)).batch(64).shuffle(buffer_size=1024)
+    test_dataset = tf.data.Dataset.from_tensor_slices((X_test_processed, y_test)).batch(64)
+    
+    print("******* Building and Training the Model *****")
+    
+    # Define the Keras model for binary classification
+    model = Sequential([
+        Input(shape=(X_train_processed.shape[1],)),  
+        Dense(64, activation='relu'),                 # First hidden layer
+        Dense(32, activation='relu'),                 # Second hidden layer
+        Dense(16, activation='relu'),
+        Dense(1, activation="sigmoid")                # Output layer for binary classification
+    ])
+    
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy', metrics=['accuracy'])
+    
+    # Set up early stopping and model checkpointing
+    early_stopping = EarlyStopping(monitor='val_loss', patience=100, restore_best_weights=True)
+    
+    # ModelCheckpoint: Save the model with the best validation loss
+    checkpoint = ModelCheckpoint("best_model.h5.keras", monitor='val_loss', save_best_only=True, verbose=1)
+    
+    # Train the model using tf.data.Dataset
+    history = model.fit(
+        train_dataset,
+        validation_data=test_dataset,
+        epochs=10000,  # Increased number of epochs for better training
+        callbacks=[early_stopping, checkpoint],  # Added model checkpointing
+        verbose=1
+    )
+    
+    print("Model training completed.")
+    
+    print("***** Evaluating the Model *****")
+    y_pred = (model.predict(X_test_processed) > 0.5).astype("int32")  # Use threshold for classification
+    
+    # Check shapes
+    print("Shape of X_test_processed:", X_test_processed.shape)
+    print("Shape of y_pred:", y_pred.shape)
+    
+    # Calculate evaluation metrics
+    accuracy = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    roc_auc = roc_auc_score(y_test, y_pred)
+    
+    print(f"Accuracy: {accuracy:.2f}")
+    print(f"F1 Score: {f1:.2f}")
+    print(f"Recall: {recall:.2f}")
+    print(f"Precision: {precision:.2f}")
+    print(f"ROC AUC Score: {roc_auc:.2f}")
+
+    # Plot training history
+    def plot_history(history):
+        plt.plot(history.history['loss'], label='Training Loss')
+        plt.plot(history.history['val_loss'], label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.show()
+
+    plot_history(history)
+    
+    return X, y, categorical_c, numerical_c, y_test, y_pred
+
+# Example usage
+X, y, categorical_c, numerical_c, y_test, y_pred = modelling_dl(df, "Churn")
+# Accuracy: 0.79
+#F1 Score: 0.51
+#Recall: 0.42
+#Precision: 0.64
+# ROC AUC Score: 0.67
+
+### If we want to reuse the model, we use the model for loading.
+from tensorflow.keras.models import load_model
+
+best_model = load_model('best_model.h5.keras')
+
+y_pred_loaded_model = (best_model.predict(X_test_processed) > 0.5).astype("int32")
+
+accuracy_loaded = accuracy_score(y_test, y_pred_loaded_model)
+print(f"Loaded Model Accuracy: {accuracy_loaded:.2f}")
